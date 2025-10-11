@@ -11,11 +11,11 @@ const App = () => {
   const {userData} = useContext(UserDataContext);
   return (
     <Routes>
-      <Route path="/" element={!userData ?<Navigate to="/signup" /> : userData.user?.assistantImage && userData.user?.assistantName  ? <Home /> : <Navigate to={"/customizes"}/>} />
-      <Route path="/signup" element={!userData ? <SignUp /> : <Navigate to={"/"}/> } />
+      <Route path="/" element={!userData ?<Navigate to="/signin" /> : userData.user?.assistantImage && userData.user?.assistantName  ? <Home /> : <Navigate to={"/customize"}/>} />
+      <Route path="/signup" element={!userData ? <SignUp /> : <Navigate to={"/signin"}/> } />
       <Route path="/signin" element={!userData ? <SignIn /> : <Navigate to={"/"}/>} />
-      <Route path="/customize" element={userData ? <Customize />: <Navigate to={"/signup"}/>} />
-      <Route path="/customize2" element={userData ? <Customize2 />: <Navigate to={"/signup"}/>} />
+      <Route path="/customize" element={userData ? <Customize />: <Navigate to={"/signin"}/>} />
+      <Route path="/customize2" element={userData ? <Customize2 />: <Navigate to={"/signin"}/>} />
     </Routes>
   );
 }

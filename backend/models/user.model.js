@@ -20,6 +20,10 @@ const userSchema = new mongoose.Schema({
     assistantImage:{
         type:String,
     },
+    learningMode:{
+        type:Boolean,
+        default:false,  // Learning mode OFF by default
+    },
     history:[
         {type:String}
     ]
