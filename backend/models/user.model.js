@@ -22,7 +22,28 @@ const userSchema = new mongoose.Schema({
     },
     learningMode:{
         type:Boolean,
-        default:false,  // Learning mode OFF by default
+        default:false,
+    },
+    // EXISTING FIELDS
+    preferredLanguage:{
+        type:String,
+        enum:['en', 'hi', 'hinglish', 'pa', 'mr', 'bn', 'ta', 'te', 'gu'],
+        default:'en'
+    },
+    personality:{
+        type:String,
+        enum:['professional', 'friendly', 'funny', 'motivational', 'sarcastic'],
+        default:'friendly'
+    },
+    emotionDetection:{
+        type:Boolean,
+        default:true
+    },
+    // NEW FIELD - THEME
+    theme:{
+        type:String,
+        enum:['dark', 'light', 'neon', 'sunset'],
+        default:'dark'
     },
     history:[
         {type:String}

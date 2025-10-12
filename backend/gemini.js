@@ -1,11 +1,193 @@
 import axios from 'axios';
+import languageService from './services/languageService.js';
+import emotionService from './services/emotionService.js';
 
-const geminiResponse = async(command, assistantName, userName, learningMode = false) => {
+// API Key Manager Class with Smart Recovery
+class GeminiAPIManager {
+    constructor() {
+        this.apiKeys = this.loadAPIKeys();
+        this.currentKeyIndex = 0;
+        this.keyStatus = new Array(this.apiKeys.length).fill(null).map(() => ({
+            active: true,
+            exhaustedAt: null
+        }));
+        this.resetInterval = 60 * 60 * 1000; // 1 hour
+        console.log(`✅ Loaded ${this.apiKeys.length} Gemini API key(s)`);
+    }
+
+    loadAPIKeys() {
+        const keys = [];
+        let i = 1;
+        
+        while (process.env[`GEMINI_API_KEY_${i}`]) {
+            keys.push(process.env[`GEMINI_API_KEY_${i}`]);
+            i++;
+        }
+        
+        if (keys.length === 0 && process.env.GEMINI_API_URL) {
+            const urlMatch = process.env.GEMINI_API_URL.match(/key=([^&]+)/);
+            if (urlMatch) {
+                keys.push(urlMatch[1]);
+            }
+        }
+        
+        if (keys.length === 0) {
+            throw new Error('❌ No Gemini API keys found!');
+        }
+        
+        return keys;
+    }
+
+    getCurrentAPIUrl() {
+        const key = this.apiKeys[this.currentKeyIndex];
+        return `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`;
+    }
+
+    // Check if key has recovered (1 hour passed)
+    hasKeyRecovered(keyIndex) {
+        const status = this.keyStatus[keyIndex];
+        if (status.active) return true;
+        if (!status.exhaustedAt) return true;
+        
+        const timePassed = Date.now() - status.exhaustedAt;
+        return timePassed >= this.resetInterval;
+    }
+
+    // Find next available key (check recovery first)
+    findNextAvailableKey() {
+        // First check if Key 1 has recovered
+        if (this.currentKeyIndex !== 0 && this.hasKeyRecovered(0)) {
+            console.log(`✅ Key #1 recovered! Switching back to Key #1`);
+            this.keyStatus[0].active = true;
+            this.keyStatus[0].exhaustedAt = null;
+            return 0;
+        }
+
+        // Then check other keys in order
+        for (let i = 0; i < this.apiKeys.length; i++) {
+            if (i === this.currentKeyIndex) continue;
+            
+            if (this.hasKeyRecovered(i)) {
+                if (!this.keyStatus[i].active) {
+                    console.log(`✅ Key #${i + 1} recovered!`);
+                    this.keyStatus[i].active = true;
+                    this.keyStatus[i].exhaustedAt = null;
+                }
+                return i;
+            }
+        }
+
+        return -1; // No key available
+    }
+
+    async makeRequest(payload) {
+        let attempts = 0;
+        const maxAttempts = this.apiKeys.length * 2; // Extra attempts for recovery
+
+        while (attempts < maxAttempts) {
+            try {
+                const url = this.getCurrentAPIUrl();
+                const response = await axios.post(url, payload);
+                
+                // Success! Return data
+                return response.data;
+
+            } catch (error) {
+                const status = error.response?.status;
+                const errorData = error.response?.data;
+                const errorMessage = errorData?.error?.message || '';
+
+                // Check if rate limit error
+                const isRateLimit = 
+                    status === 429 || 
+                    errorData?.error?.code === 429 ||
+                    errorData?.error?.status === 'RESOURCE_EXHAUSTED' ||
+                    errorMessage.includes('quota') ||
+                    errorMessage.includes('rate limit');
+
+                if (isRateLimit) {
+                    // Mark current key as exhausted
+                    this.keyStatus[this.currentKeyIndex].active = false;
+                    this.keyStatus[this.currentKeyIndex].exhaustedAt = Date.now();
+                    
+                    console.log(`⚠️ Key #${this.currentKeyIndex + 1} exhausted, finding next...`);
+
+                    // Find next available key
+                    const nextKeyIndex = this.findNextAvailableKey();
+                    
+                    if (nextKeyIndex !== -1) {
+                        this.currentKeyIndex = nextKeyIndex;
+                        console.log(`🔄 Switched to Key #${this.currentKeyIndex + 1}`);
+                        attempts++;
+                        continue; // Try again with new key
+                    } else {
+                        // All keys exhausted
+                        const oldestKey = this.keyStatus.reduce((oldest, current, index) => {
+                            if (!current.exhaustedAt) return oldest;
+                            if (!oldest.exhaustedAt) return current;
+                            return current.exhaustedAt < oldest.exhaustedAt ? current : oldest;
+                        }, this.keyStatus[0]);
+                        
+                        const waitTime = oldestKey.exhaustedAt ? 
+                            Math.ceil((this.resetInterval - (Date.now() - oldestKey.exhaustedAt)) / 60000) : 
+                            60;
+                        
+                        throw new Error(`All API keys exhausted. Please wait ${waitTime} minutes.`);
+                    }
+                }
+
+                // Other errors
+                console.error(`❌ API Error:`, errorMessage);
+                throw error;
+            }
+        }
+
+        throw new Error('Maximum retry attempts reached');
+    }
+}
+
+// Create singleton instance
+const geminiManager = new GeminiAPIManager();
+
+const geminiResponse = async(command, assistantName, userName, userSettings) => {
     try {
-        const apiUrl = process.env.GEMINI_API_URL;
+        const { learningMode, preferredLanguage, personality, emotionDetection } = userSettings;
+        
+        // Detect emotion if enabled
+        let emotion = 'neutral';
+        let emotionPrefix = '';
+        let emotionSuggestion = '';
+        
+        if(emotionDetection) {
+            emotion = emotionService.detectEmotion(command);
+            emotionPrefix = emotionService.getEmotionResponse(emotion, personality);
+            emotionSuggestion = emotionService.getEmotionSuggestion(emotion);
+        }
+
+        // Personality descriptions
+        const personalityInstructions = {
+            professional: "Be formal, concise, and business-like. Use professional language.",
+            friendly: "Be warm, casual, and approachable. Like talking to a good friend.",
+            funny: "Be humorous, witty, and entertaining. Make jokes when appropriate.",
+            motivational: "Be inspiring, encouraging, and positive. Motivate the user.",
+            sarcastic: "Be witty with gentle sarcasm. Keep it fun, not mean."
+        };
+
+        const languageName = languageService.getLanguageName(preferredLanguage);
         
         const prompt = `You are a virtual assistant named ${assistantName}. I was created by ${userName}.
-You are not Google. You will now behave like a voice-enabled assistant with advanced capabilities.
+
+PERSONALITY MODE: ${personality.toUpperCase()}
+${personalityInstructions[personality]}
+
+PREFERRED LANGUAGE: ${languageName}
+- Respond primarily in ${languageName}
+- If ${languageName} is "Hinglish", mix Hindi and English naturally (like: "Aap ka kaam done hai")
+- Keep natural flow and cultural context
+
+EMOTION DETECTED: ${emotion.toUpperCase()}
+${emotionPrefix ? `Start response with: "${emotionPrefix}"` : ''}
+${emotionSuggestion ? `Suggest: "${emotionSuggestion}"` : ''}
 
 LEARNING MODE STATUS: ${learningMode ? 'ENABLED' : 'DISABLED'}
 
@@ -15,6 +197,7 @@ Your task is to understand the user's natural language input and respond with a 
   "userInput": "<processed-input>",
   "response": "<voice-friendly-response>",
   "learningFeedback": "<correction-in-hindi>",
+  "emotion": "${emotion}",
   "confidence": <0-100>
 }
 
@@ -26,114 +209,48 @@ AVAILABLE TYPES:
 "open-website" | "open-app" | "close-app" | "set-reminder" | "set-alarm" | "set-timer" |
 "calculate" | "translate" | "spell-check" | "define-word" | "synonyms" | "antonyms" |
 "history-facts" | "science-facts" | "math-facts" | "geography-facts" | "tech-facts" |
-"play-music" | "learning-mode-on" | "learning-mode-off" | "conversation" | "tell-about-yourself"
+"play-music" | "learning-mode-on" | "learning-mode-off" | "change-language" | 
+"change-personality" | "conversation" | "tell-about-yourself"
 
-FIELD DESCRIPTIONS:
+RESPONSE GUIDELINES:
+1. Match the personality style in your response
+2. Use the preferred language
+3. If emotion detected, address it appropriately
+4. Keep responses 30-40 words for voice
+5. Be natural and conversational
 
-1. "type": Determine the user's intent from the types listed above.
+PERSONALITY EXAMPLES:
 
-2. "userInput": 
-   - Original user input with assistant name removed if present
-   - For search queries, extract only the search term
-   - Example: "search for cute cats on youtube" → userInput: "cute cats"
-   - For general questions, keep the full question
-   - Clean format, remove filler words
+Professional: "Good morning. The current time is 10:30 AM. Is there anything else I can assist you with?"
+Friendly: "Hey! It's 10:30 AM right now. What else can I help you with?"
+Funny: "It's 10:30! Time flies when you're having fun... or maybe you just need a new watch! 😄"
+Motivational: "It's 10:30 AM - a perfect time to conquer your goals! You've got this!"
+Sarcastic: "Oh look, it's 10:30. Surprised? Yeah, time keeps moving. Shocking, I know!"
 
-3. "response": 
-   - A natural, conversational response in the language user prefers
-   - Maximum 30-40 words for voice output
-   - Be helpful, friendly, and engaging
-   - For general questions, provide complete and clear answers
-   - Don't cut answers short - explain properly but concisely
-   - Use simple language that's easy to understand when spoken
-   - Add context when needed for better understanding
+LANGUAGE EXAMPLES:
 
-4. "learningFeedback": (ONLY WHEN LEARNING MODE IS ENABLED)
-   - If user makes grammatical or pronunciation errors in English, provide correction
-   - Write feedback in Hindi (mixing English words is fine)
-   - Format: "Aapne '<incorrect>' bola, sahi hai '<correct>'. Aise boliye: '<example sentence>'"
-   - If English is correct, leave this field as empty string ""
-   - Be encouraging and supportive in corrections
+English: "The weather today is sunny with a temperature of 28 degrees."
+Hindi: "Aaj ka mausam dhoop wala hai aur tapman 28 degree hai."
+Hinglish: "Aaj ka weather sunny hai, temperature 28 degrees hai."
 
-5. "confidence": 
-   - Rate your confidence in understanding the query (0-100)
-   - Use this to indicate if clarification might be needed
+LEARNING MODE (only if enabled):
+- Correct English grammar errors
+- Provide feedback in Hindi
+- Be encouraging
 
-TYPE DEFINITIONS:
-
-- "general": Factual/informational questions you can answer directly, conversations, small talk
-- "conversation": Casual chat, greetings, how are you, etc.
-- "google-search": User wants to search something on Google
-- "youtube-search": User wants to search on YouTube
-- "youtube-play": User wants to play a specific video/song directly
-- "get-time/date/day/month/year": Time/calendar information
-- "calculator-open": Open calculator app
-- "instagram-open/facebook-open/twitter-open": Open social media
-- "get-weather": Weather information
-- "get-news": Latest news
-- "get-joke/quote/fact/story": Entertainment content
-- "open-website": Open specific website (extract URL in userInput)
-- "open-app": Open specific application
-- "close-app": Close running application
-- "set-reminder/alarm/timer": Time-based alerts
-- "calculate": Perform mathematical calculation
-- "translate": Translate text between languages
-- "define-word": Dictionary definition
-- "synonyms/antonyms": Word relationships
-- "learning-mode-on": User wants to enable English learning mode
-- "learning-mode-off": User wants to disable English learning mode
-- "tell-about-yourself": User asks about you, your creator, your capabilities
-
-LEARNING MODE RULES:
-${learningMode ? `
-- You are now an English teacher assistant
-- Listen carefully to user's English
-- Correct grammar, pronunciation hints, word choice
-- Be patient and encouraging
-- Provide corrections in Hindi for better understanding
-- Continue normal assistant functions while teaching
-- Examples of corrections:
-  * "I goes to school" → "Aapne 'goes' bola but 'I' ke saath 'go' aata hai. Sahi hai: 'I go to school'"
-  * "He don't like" → "Sahi nahi hai. 'He' ke saath 'doesn't' use hota hai: 'He doesn't like'"
-  * Wrong pronunciation hints: "Actually yeh word 'pronunciation' aisa bolte hain, na ki 'pronounciation'"
-` : '- Learning mode is OFF, no corrections needed'}
-
-IMPORTANT INSTRUCTIONS:
-- Use ${userName} when asked about your creator
-- Be conversational and natural, not robotic
-- For general questions, give complete helpful answers (not just 2-3 words)
-- Explain concepts clearly when needed
-- Adapt response length to question complexity
-- Always respond ONLY with valid JSON, no extra text
-- Ensure all JSON fields are properly formatted
-- Use proper escape characters for quotes in responses
-- Be culturally aware (user is from India)
-
-EXAMPLE RESPONSES:
-
-User: "What is photosynthesis?"
-{
-  "type": "general",
-  "userInput": "what is photosynthesis",
-  "response": "Photosynthesis is the process where plants use sunlight, water and carbon dioxide to create oxygen and energy in the form of sugar. It's how plants make their own food.",
-  "learningFeedback": "",
-  "confidence": 95
-}
-
-User: "He don't know anything" (Learning Mode ON)
-{
-  "type": "conversation",
-  "userInput": "he don't know anything",
-  "response": "I understand what you're saying.",
-  "learningFeedback": "Aapne 'He don't' bola. Sahi nahi hai. 'He' ke saath 'doesn't' use hota hai. Sahi sentence: 'He doesn't know anything'. Yaad rakhiye: I/You/We/They ke saath 'don't' aur He/She/It ke saath 'doesn't'",
-  "confidence": 100
-}
+IMPORTANT:
+- Always respond in valid JSON format
+- Include emotion field
+- Match personality in tone
+- Use preferred language
+- Be culturally appropriate
 
 Now process this user input: ${command}
 
 Respond ONLY with the JSON object, nothing else.`;
 
-        const result = await axios.post(apiUrl, {
+        // Use API manager - handles rotation automatically
+        const result = await geminiManager.makeRequest({
             "contents": [{
                 "parts": [{
                     "text": prompt
@@ -141,12 +258,29 @@ Respond ONLY with the JSON object, nothing else.`;
             }]
         });
 
-        return result.data.candidates[0].content.parts[0].text;
+        let responseText = result.candidates[0].content.parts[0].text;
+        
+        // Parse JSON response
+        const jsonMatch = responseText.match(/{[\s\S]*}/);
+        if(jsonMatch) {
+            const parsedResponse = JSON.parse(jsonMatch[0]);
+            
+            // Translate response if needed
+            if(preferredLanguage !== 'en' && preferredLanguage !== 'hinglish') {
+                parsedResponse.response = await languageService.translate(
+                    parsedResponse.response, 
+                    preferredLanguage
+                );
+            }
+            
+            return JSON.stringify(parsedResponse);
+        }
+
+        return responseText;
     } catch (error) {
-        console.log("Error in geminiResponse:", error);
+        console.log("❌ Error in geminiResponse:", error.message);
         throw error;
     }
 }
 
 export default geminiResponse;
-
