@@ -19,8 +19,7 @@ const Home = () => {
   const [theme, setTheme] = useState(userData?.user?.theme || 'dark');
   const [isSupported, setIsSupported] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
-  const [userInitiated, setUserInitiated] = useState(false);
-  const [displayText, setDisplayText] = useState(""); // NEW: Separate display text
+  const [displayText, setDisplayText] = useState("");
   
   const isSpeakingRef = useRef(false);
   const recognitionRef = useRef(null);
@@ -30,6 +29,7 @@ const Home = () => {
   const synth = window.speechSynthesis;
   const isRecognizingRef = useRef(false);
   const hasGreetedRef = useRef(false);
+  const autoStartedRef = useRef(false); // NEW: Track if auto-started on desktop
 
   // Theme configurations
   const themes = {
@@ -182,7 +182,6 @@ const Home = () => {
     }
   };
 
-  // FIXED: Keep text visible during and after speech
   const speak = (text) => {
     return new Promise((resolve) => {
       synth.cancel();
@@ -210,8 +209,6 @@ const Home = () => {
         
         utterance.onend = () => {
           isSpeakingRef.current = false;
-          // CHANGED: Don't clear aiText immediately
-          // Let it stay visible for user to read
           setShowFeedback(false);
           resolve();
         };
@@ -230,10 +227,6 @@ const Home = () => {
   const startRecognition = () => {
     if (!isSupported) {
       alert('Speech recognition is not supported on this browser. Please use Chrome on Android or desktop.');
-      return;
-    }
-
-    if (!userInitiated && isMobile) {
       return;
     }
 
@@ -261,22 +254,21 @@ const Home = () => {
     }
   };
 
+  // Mobile button toggle
   const toggleRecognition = () => {
-    if (!userInitiated) {
-      setUserInitiated(true);
-      
-      if (!hasGreetedRef.current) {
-        hasGreetedRef.current = true;
-        const greeting = `Hello ${userData.user.name}, What can I help you with?`;
-        setDisplayText(greeting);
-        speak(greeting);
-      }
-    }
-
-    if (listening) {
-      stopRecognition();
+    if (!hasGreetedRef.current) {
+      hasGreetedRef.current = true;
+      const greeting = `Hello ${userData.user.name}, What can I help you with?`;
+      setDisplayText(greeting);
+      speak(greeting).then(() => {
+        startRecognition();
+      });
     } else {
-      startRecognition();
+      if (listening) {
+        stopRecognition();
+      } else {
+        startRecognition();
+      }
     }
   };
 
@@ -299,7 +291,6 @@ const Home = () => {
       }));
     }
     
-    // CHANGED: Keep response visible
     setDisplayText(response);
     await speak(response);
     
@@ -318,15 +309,12 @@ const Home = () => {
 
     commandActions[type]?.();
     
-    // CHANGED: Clear display text after a delay (5 seconds)
     setTimeout(() => {
       setDisplayText("");
     }, 5000);
     
-    // Restart recognition
-    if (userInitiated) {
-      setTimeout(() => startRecognition(), 1000);
-    }
+    // FIXED: Restart recognition for both mobile and desktop
+    setTimeout(() => startRecognition(), 1000);
   };
 
   useEffect(() => {
@@ -337,7 +325,7 @@ const Home = () => {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = !isMobile;
+    recognition.continuous = !isMobile; // Continuous only on desktop
     recognition.lang = 'en-US';
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
@@ -346,17 +334,17 @@ const Home = () => {
 
     let isMounted = true;
     
-    if (!isMobile) {
+    // FIXED: Auto-start only on desktop
+    if (!isMobile && !autoStartedRef.current) {
+      autoStartedRef.current = true;
       setTimeout(() => {
         if (isMounted && !isSpeakingRef.current && !isRecognizingRef.current) {
-          setUserInitiated(true);
           hasGreetedRef.current = true;
           const greeting = `Hello ${userData.user.name}, What can I help you with?`;
           setDisplayText(greeting);
-          speak(greeting)
-            .then(() => {
-              if (isMounted) startRecognition();
-            });
+          speak(greeting).then(() => {
+            if (isMounted) startRecognition();
+          });
         }
       }, 1000);
     }
@@ -370,7 +358,8 @@ const Home = () => {
       isRecognizingRef.current = false;
       setListening(false);
       
-      if (isMounted && !isSpeakingRef.current && !isMobile && userInitiated) {
+      // FIXED: Auto-restart only on desktop in continuous mode
+      if (isMounted && !isSpeakingRef.current && !isMobile && autoStartedRef.current) {
         setTimeout(() => {
           if (isMounted) {
             try { 
@@ -388,7 +377,8 @@ const Home = () => {
       isRecognizingRef.current = false;
       setListening(false);
       
-      if (event.error === 'no-speech' && !isMobile) {
+      // FIXED: Auto-restart on no-speech only for desktop
+      if (event.error === 'no-speech' && !isMobile && autoStartedRef.current) {
         setTimeout(() => startRecognition(), 1000);
       }
     };
@@ -402,7 +392,6 @@ const Home = () => {
       if (userData?.user?.assistantName && 
           transcript.toLowerCase().includes(userData.user.assistantName.toLowerCase())) {
         
-        // Show what user said
         setUserText(transcript);
         setDisplayText(`You: ${transcript}`);
         
@@ -420,13 +409,12 @@ const Home = () => {
           setDisplayText(errorMsg);
           await speak(errorMsg);
           setTimeout(() => setDisplayText(""), 3000);
-          if (userInitiated) {
-            setTimeout(() => startRecognition(), 1000);
-          }
+          setTimeout(() => startRecognition(), 1000);
         } finally {
           setUserText("");
         }
       } else if (isMobile && listening) {
+        // On mobile, restart after each result
         setTimeout(() => startRecognition(), 500);
       }
     };
@@ -438,7 +426,7 @@ const Home = () => {
       isRecognizingRef.current = false;
       synth.cancel();
     };
-  }, [isMobile, userInitiated]);
+  }, [isMobile]);
 
   return (
     <div className={`w-full min-h-[100vh] bg-gradient-to-br ${currentTheme.bg} flex flex-col items-center justify-center p-4 relative overflow-hidden`}>
@@ -453,7 +441,7 @@ const Home = () => {
       )}
 
       {/* Mobile Instructions */}
-      {isMobile && !userInitiated && (
+      {isMobile && !hasGreetedRef.current && (
         <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-blue-500 text-white px-6 py-4 rounded-2xl shadow-2xl max-w-[90%] z-50 text-center">
           <p className="font-semibold mb-2">Tap the microphone button below to start</p>
           <p className="text-sm">Voice recognition requires your permission</p>
@@ -541,7 +529,7 @@ const Home = () => {
           </span>
         </h1>
 
-        {/* FIXED: Mobile Microphone Button */}
+        {/* Mobile Microphone Button */}
         {isMobile && isSupported && (
           <button
             onClick={toggleRecognition}
@@ -555,7 +543,7 @@ const Home = () => {
           </button>
         )}
 
-        {/* Voice Visualizer */}
+        {/* Voice Visualizer - Desktop */}
         {listening && !isMobile && (
           <div className={`${currentTheme.card} backdrop-blur-lg rounded-3xl p-6 w-full max-w-md`}>
             <div className="flex items-center justify-center gap-2 mb-4">
@@ -588,7 +576,7 @@ const Home = () => {
           </div>
         )}
 
-        {/* FIXED: Text Display - Now uses displayText state */}
+        {/* Text Display */}
         {displayText && (
           <div className={`${currentTheme.card} backdrop-blur-lg rounded-3xl p-6 max-w-2xl w-full animate-fade-in`}>
             <p className={`${currentTheme.text} text-lg text-center leading-relaxed whitespace-pre-wrap`}>
