@@ -3,7 +3,7 @@ import { UserDataContext } from '../context/userDataContext';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { IoSettings, IoColorPalette } from "react-icons/io5";
-import { FaGraduationCap, FaMicrophone } from "react-icons/fa";
+import { FaGraduationCap, FaMicrophone, FaMicrophoneSlash } from "react-icons/fa";
 import { MdLogout } from "react-icons/md";
 
 const Home = () => {
@@ -17,6 +17,10 @@ const Home = () => {
   const [emotion, setEmotion] = useState("neutral");
   const [audioData, setAudioData] = useState([]);
   const [theme, setTheme] = useState(userData?.user?.theme || 'dark');
+  const [isSupported, setIsSupported] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
+  const [userInitiated, setUserInitiated] = useState(false);
+  const [displayText, setDisplayText] = useState(""); // NEW: Separate display text
   
   const isSpeakingRef = useRef(false);
   const recognitionRef = useRef(null);
@@ -25,6 +29,7 @@ const Home = () => {
   const dataArrayRef = useRef(null);
   const synth = window.speechSynthesis;
   const isRecognizingRef = useRef(false);
+  const hasGreetedRef = useRef(false);
 
   // Theme configurations
   const themes = {
@@ -64,6 +69,23 @@ const Home = () => {
 
   const currentTheme = themes[theme] || themes.dark;
 
+  // Check device and browser support
+  useEffect(() => {
+    const checkSupport = () => {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      
+      setIsMobile(isMobileDevice);
+      setIsSupported(!!SpeechRecognition && !!window.speechSynthesis);
+      
+      if (!SpeechRecognition) {
+        console.warn('Speech Recognition not supported');
+      }
+    };
+    
+    checkSupport();
+  }, []);
+
   // Get emotion emoji
   const getEmotionEmoji = (emotion) => {
     const emojis = {
@@ -77,8 +99,10 @@ const Home = () => {
     return emojis[emotion] || '😐';
   };
 
-  // Setup audio visualization
+  // Setup audio visualization (only on desktop)
   useEffect(() => {
+    if (isMobile) return;
+    
     const setupAudio = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -94,10 +118,12 @@ const Home = () => {
       }
     };
     setupAudio();
-  }, []);
+  }, [isMobile]);
 
   // Animate audio visualization
   useEffect(() => {
+    if (isMobile) return;
+    
     let animationId;
     const animate = () => {
       if (analyserRef.current && listening) {
@@ -108,7 +134,7 @@ const Home = () => {
     };
     if (listening) animate();
     return () => cancelAnimationFrame(animationId);
-  }, [listening]);
+  }, [listening, isMobile]);
 
   const getSpeechLang = () => {
     const langMap = {
@@ -156,65 +182,131 @@ const Home = () => {
     }
   };
 
-  const startRecognition = () => {
-    if(!isRecognizingRef.current && !isSpeakingRef.current){
-      try {
-        recognitionRef.current?.start();
-        setListening(true);
-      } catch (error) {
-        if(!error.message.includes("start")){
-          console.error("Recognition error:", error);
+  // FIXED: Keep text visible during and after speech
+  const speak = (text) => {
+    return new Promise((resolve) => {
+      synth.cancel();
+      
+      setTimeout(() => {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = getSpeechLang();
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        
+        let voices = synth.getVoices();
+        if (voices.length === 0) {
+          synth.addEventListener('voiceschanged', () => {
+            voices = synth.getVoices();
+            const preferredVoice = voices.find(v => v.lang === getSpeechLang());
+            if (preferredVoice) utterance.voice = preferredVoice;
+          });
+        } else {
+          const preferredVoice = voices.find(v => v.lang === getSpeechLang());
+          if (preferredVoice) utterance.voice = preferredVoice;
         }
+        
+        isSpeakingRef.current = true;
+        
+        utterance.onend = () => {
+          isSpeakingRef.current = false;
+          // CHANGED: Don't clear aiText immediately
+          // Let it stay visible for user to read
+          setShowFeedback(false);
+          resolve();
+        };
+        
+        utterance.onerror = (event) => {
+          console.error('Speech error:', event);
+          isSpeakingRef.current = false;
+          resolve();
+        };
+        
+        synth.speak(utterance);
+      }, 100);
+    });
+  };
+
+  const startRecognition = () => {
+    if (!isSupported) {
+      alert('Speech recognition is not supported on this browser. Please use Chrome on Android or desktop.');
+      return;
+    }
+
+    if (!userInitiated && isMobile) {
+      return;
+    }
+
+    if (isRecognizingRef.current || isSpeakingRef.current) {
+      return;
+    }
+
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.start();
+        setListening(true);
+      }
+    } catch (error) {
+      if (error.name !== 'InvalidStateError') {
+        console.error("Recognition start error:", error);
       }
     }
   };
 
-  const speak = (text) => {
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = getSpeechLang();
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => v.lang === getSpeechLang());
-    
-    if(preferredVoice) utterance.voice = preferredVoice;
-    
-    isSpeakingRef.current = true;
-    
-    utterance.onend = () => {
-      setAiText("");
-      setShowFeedback(false);
-      isSpeakingRef.current = false;
-      setTimeout(() => startRecognition(), 900);
-    };
-    
-    synth.cancel();
-    synth.speak(utterance);
+  const stopRecognition = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      setListening(false);
+      isRecognizingRef.current = false;
+    }
   };
 
-  const handleCommand = (data) => {
+  const toggleRecognition = () => {
+    if (!userInitiated) {
+      setUserInitiated(true);
+      
+      if (!hasGreetedRef.current) {
+        hasGreetedRef.current = true;
+        const greeting = `Hello ${userData.user.name}, What can I help you with?`;
+        setDisplayText(greeting);
+        speak(greeting);
+      }
+    }
+
+    if (listening) {
+      stopRecognition();
+    } else {
+      startRecognition();
+    }
+  };
+
+  const handleCommand = async (data) => {
     const {type, userInput, response, learningFeedback, emotion: detectedEmotion} = data;
     
-    if(detectedEmotion) setEmotion(detectedEmotion);
+    if (detectedEmotion) setEmotion(detectedEmotion);
     
-    if(type === 'learning-mode-on') {
+    if (type === 'learning-mode-on') {
       setUserData(prev => ({
         ...prev,
         user: { ...prev.user, learningMode: true }
       }));
     }
     
-    if(type === 'learning-mode-off') {
+    if (type === 'learning-mode-off') {
       setUserData(prev => ({
         ...prev,
         user: { ...prev.user, learningMode: false }
       }));
     }
     
-    speak(response);
+    // CHANGED: Keep response visible
+    setDisplayText(response);
+    await speak(response);
     
-    if(learningFeedback && learningFeedback.trim() !== "") {
+    if (learningFeedback && learningFeedback.trim() !== "") {
       setLearningFeedback(learningFeedback);
       setShowFeedback(true);
-      setTimeout(() => speak(learningFeedback), response.length * 50);
+      await speak(learningFeedback);
     }
 
     const commandActions = {
@@ -225,25 +317,49 @@ const Home = () => {
     };
 
     commandActions[type]?.();
+    
+    // CHANGED: Clear display text after a delay (5 seconds)
+    setTimeout(() => {
+      setDisplayText("");
+    }, 5000);
+    
+    // Restart recognition
+    if (userInitiated) {
+      setTimeout(() => startRecognition(), 1000);
+    }
   };
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      console.warn('Speech Recognition not supported');
+      return;
+    }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
+    recognition.continuous = !isMobile;
     recognition.lang = 'en-US';
     recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    
     recognitionRef.current = recognition;
 
     let isMounted = true;
     
-    setTimeout(() => {
-      if (isMounted && !isSpeakingRef.current && !isRecognizingRef.current){
-        try { recognition.start(); } catch (error) {}
-      }
-    }, 1100);
+    if (!isMobile) {
+      setTimeout(() => {
+        if (isMounted && !isSpeakingRef.current && !isRecognizingRef.current) {
+          setUserInitiated(true);
+          hasGreetedRef.current = true;
+          const greeting = `Hello ${userData.user.name}, What can I help you with?`;
+          setDisplayText(greeting);
+          speak(greeting)
+            .then(() => {
+              if (isMounted) startRecognition();
+            });
+        }
+      }, 1000);
+    }
 
     recognition.onstart = () => {
       isRecognizingRef.current = true;
@@ -253,73 +369,96 @@ const Home = () => {
     recognition.onend = () => {
       isRecognizingRef.current = false;
       setListening(false);
-      if(isMounted && !isSpeakingRef.current){
+      
+      if (isMounted && !isSpeakingRef.current && !isMobile && userInitiated) {
         setTimeout(() => {
-          if (isMounted) try { recognition.start(); } catch (error) {}
-        }, 800);
+          if (isMounted) {
+            try { 
+              recognition.start(); 
+            } catch (error) {
+              // Ignore
+            }
+          }
+        }, 500);
       }
     };
 
     recognition.onerror = (event) => {
+      console.error('Recognition error:', event.error);
       isRecognizingRef.current = false;
       setListening(false);
+      
+      if (event.error === 'no-speech' && !isMobile) {
+        setTimeout(() => startRecognition(), 1000);
+      }
     };
 
     recognition.onresult = async (event) => {
       const current = event.resultIndex;
       const transcript = event.results[current][0].transcript.trim();
 
+      console.log('Heard:', transcript);
+
       if (userData?.user?.assistantName && 
           transcript.toLowerCase().includes(userData.user.assistantName.toLowerCase())) {
         
-        setAiText("");
+        // Show what user said
         setUserText(transcript);
+        setDisplayText(`You: ${transcript}`);
+        
         recognition.stop();
         isRecognizingRef.current = false;
         setListening(false);
         
-        const data = await getGeminiResponse(transcript);
-        handleCommand(data);
-        setAiText(data.response);
-        setUserText("");
+        try {
+          const data = await getGeminiResponse(transcript);
+          setAiText(data.response);
+          await handleCommand(data);
+        } catch (error) {
+          console.error('Error getting response:', error);
+          const errorMsg = "Sorry, I encountered an error. Please try again.";
+          setDisplayText(errorMsg);
+          await speak(errorMsg);
+          setTimeout(() => setDisplayText(""), 3000);
+          if (userInitiated) {
+            setTimeout(() => startRecognition(), 1000);
+          }
+        } finally {
+          setUserText("");
+        }
+      } else if (isMobile && listening) {
+        setTimeout(() => startRecognition(), 500);
       }
     };
-
-    const greeting = new SpeechSynthesisUtterance(
-      `Hello ${userData.user.name}, What can I help you with?`
-    );
-    greeting.lang = getSpeechLang();
-    window.speechSynthesis.speak(greeting);
 
     return () => {
       isMounted = false;
       recognition.stop();
       setListening(false);
       isRecognizingRef.current = false;
+      synth.cancel();
     };
-  }, []);
+  }, [isMobile, userInitiated]);
 
   return (
     <div className={`w-full min-h-[100vh] bg-gradient-to-br ${currentTheme.bg} flex flex-col items-center justify-center p-4 relative overflow-hidden`}>
       
-      {/* Animated Background Particles */}
-      {/* <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {[...Array(20)].map((_, i) => (
-          <div
-            key={i}
-            className="absolute rounded-full opacity-20 animate-float"
-            style={{
-              width: Math.random() * 100 + 50,
-              height: Math.random() * 100 + 50,
-              left: `${Math.random() * 100}%`,
-              top: `${Math.random() * 100}%`,
-              background: `radial-gradient(circle, ${theme === 'neon' ? '#00ffff' : '#8b5cf6'}, transparent)`,
-              animationDelay: `${i * 0.5}s`,
-              animationDuration: `${Math.random() * 10 + 10}s`
-            }}
-          />
-        ))}
-      </div> */}
+      {/* Support Warning */}
+      {!isSupported && (
+        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-red-500 text-white px-6 py-4 rounded-2xl shadow-2xl max-w-[90%] z-50">
+          <p className="font-semibold text-center">
+            Speech recognition is not supported in your browser. Please use Chrome on Android or desktop.
+          </p>
+        </div>
+      )}
+
+      {/* Mobile Instructions */}
+      {isMobile && !userInitiated && (
+        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-blue-500 text-white px-6 py-4 rounded-2xl shadow-2xl max-w-[90%] z-50 text-center">
+          <p className="font-semibold mb-2">Tap the microphone button below to start</p>
+          <p className="text-sm">Voice recognition requires your permission</p>
+        </div>
+      )}
 
       {/* Top Bar with Buttons */}
       <div className="absolute top-4 left-4 right-4 flex justify-between items-center z-20">
@@ -402,8 +541,22 @@ const Home = () => {
           </span>
         </h1>
 
+        {/* FIXED: Mobile Microphone Button */}
+        {isMobile && isSupported && (
+          <button
+            onClick={toggleRecognition}
+            className={`${listening ? 'bg-red-500' : `bg-gradient-to-r ${currentTheme.button}`} text-white p-6 rounded-full ${currentTheme.buttonHover} transition-all duration-300 shadow-2xl`}
+          >
+            {listening ? (
+              <FaMicrophoneSlash className="w-8 h-8 animate-pulse" />
+            ) : (
+              <FaMicrophone className="w-8 h-8" />
+            )}
+          </button>
+        )}
+
         {/* Voice Visualizer */}
-        {listening && (
+        {listening && !isMobile && (
           <div className={`${currentTheme.card} backdrop-blur-lg rounded-3xl p-6 w-full max-w-md`}>
             <div className="flex items-center justify-center gap-2 mb-4">
               <FaMicrophone className={`${currentTheme.text} w-5 h-5 animate-pulse`} />
@@ -425,11 +578,21 @@ const Home = () => {
           </div>
         )}
 
-        {/* Text Display */}
-        {(userText || aiText) && (
-          <div className={`${currentTheme.card} backdrop-blur-lg rounded-3xl p-6 max-w-2xl w-full`}>
-            <p className={`${currentTheme.text} text-lg text-center leading-relaxed`}>
-              {userText || aiText}
+        {/* Mobile Listening Indicator */}
+        {listening && isMobile && (
+          <div className={`${currentTheme.card} backdrop-blur-lg rounded-3xl p-6 w-full max-w-md`}>
+            <div className="flex items-center justify-center gap-2">
+              <FaMicrophone className={`${currentTheme.text} w-5 h-5 animate-pulse`} />
+              <span className={`${currentTheme.text} font-semibold`}>Listening...</span>
+            </div>
+          </div>
+        )}
+
+        {/* FIXED: Text Display - Now uses displayText state */}
+        {displayText && (
+          <div className={`${currentTheme.card} backdrop-blur-lg rounded-3xl p-6 max-w-2xl w-full animate-fade-in`}>
+            <p className={`${currentTheme.text} text-lg text-center leading-relaxed whitespace-pre-wrap`}>
+              {displayText}
             </p>
           </div>
         )}
@@ -442,6 +605,13 @@ const Home = () => {
         }
         .animate-float {
           animation: float linear infinite;
+        }
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
         }
       `}</style>
     </div>
