@@ -10,7 +10,7 @@ import geminiResponse from './gemini.js';
 
 const app = express();
 app.use(cors({
-    origin: 'http://localhost:5173',
+    origin: 'https://ai-virtual-assistant-4luk.onrender.com',
     credentials: true,
 }));
 const PORT = process.env.PORT || 5000;
@@ -29,4 +29,5 @@ app.use("/api/user",userRouter);
 app.listen(PORT, () => {
     connectDB();
   console.log(`Server is running on http://localhost:${PORT}`);
+
 });
